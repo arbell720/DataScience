@@ -1,0 +1,284 @@
+---
+title: "NYPD Data"
+author: "Raymond Bell"
+date: "2/12/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(lubridate)
+library(readr)
+library(tidyverse)
+library(scales)
+library(splines)
+```
+
+## Analyzing NYPD data on shooting incidents from 2006 until 2020
+Specifically analyzing the per year incident rates for each individual Borough.
+Including the unemployment rate for the time period to find if there is a high correlation between shooting incidents and unemployment.
+Also, looking at the correlation between warmer/hotter months of the year and increased incident counts.  Generating a model that fits the per month data that could be used to predict future trends.
+
+
+Loading shooting incident data from <https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD>.  Tidying up the data so the date and time columns are actually date and time types as opposed to strings.  Removing Lon_Lat that duplicates data in other columns.
+
+Loading unemployment data from the Bureau of Labor Statistics <https://www.bls.gov/web/metro/ssamatab2.txt>.  Needed to tidy unemployment data as it did not start in csv format.  Needed year and unemployment rate data from the dataset.
+
+```{r loading, echo=TRUE}
+url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+url_unemployment <- "https://www.bls.gov/web/metro/ssamatab2.txt"
+
+nypd_data <- read.csv(url_in)
+ 
+ny_unemployment <- read.table(url_unemployment,header = F, skip = 5, sep="\t")
+
+
+nypd_data <- nypd_data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(OCCUR_TIME = hms(OCCUR_TIME)) %>%
+  select(-c(Lon_Lat))
+
+summary(nypd_data)
+
+```
+
+Using a pivot_wider to group by year and place the incident count for each borough in a separate column.  Displaying and then plotting this data.
+
+```{r year_borough, echo=TRUE}
+
+by_date <- nypd_data %>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  select(c(year, BORO)) %>%
+  pivot_wider(id_cols = year,
+              names_from = BORO,
+              values_from = BORO,
+              values_fn = list(BORO = length)) %>%
+  arrange(year)
+
+by_date
+
+by_date %>%
+  ggplot(aes(x= year, y= BRONX)) +
+  geom_line(aes(color="BRONX")) +
+  geom_line(aes(y= QUEENS, color="QUEENS")) +
+  geom_line(aes(y= BROOKLYN, color="BROOKLYN")) +
+  geom_line(aes(y= MANHATTAN, color="MANHATTAN")) +
+  geom_line(aes(y= `STATEN ISLAND`, color="STATEN ISLAND")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "Incidents by year", y = NULL)
+
+```
+
+As mentioned in the addressing bias section below, this original data above did not take population size into account so the incident count for Brooklyn was higher than it would be if normalized for population.  The exact opposite was true for Staten Island where the original graph might lead one to conclude that Staten Island was simply significantly safer than the other Boroughs.
+
+
+```{r year_borough_normalized, echo=TRUE}
+
+bronx_population <- 1385108
+brooklyn_population <- 2504700
+manhattan_population <- 1585873
+queens_population <- 2230722
+staten_island_population <- 468730
+# Use an adjustment number to get numbers back to a
+# similar magnitude to the originals.
+adjuster<- 1000000 
+by_date_normalized <- by_date %>%
+  mutate(BRONX = (BRONX / bronx_population) * adjuster) %>%
+  mutate(BROOKLYN = (BROOKLYN / brooklyn_population) * adjuster) %>%
+  mutate(MANHATTAN = (MANHATTAN / manhattan_population) * adjuster) %>%
+  mutate(QUEENS = (QUEENS / queens_population) * adjuster) %>%
+  mutate(`STATEN ISLAND` = (`STATEN ISLAND` / staten_island_population) * adjuster) 
+
+
+by_date_normalized
+
+by_date_normalized %>%
+  ggplot(aes(x= year, y= BRONX)) +
+  geom_line(aes(color="BRONX")) +
+  geom_line(aes(y= QUEENS, color="QUEENS")) +
+  geom_line(aes(y= BROOKLYN, color="BROOKLYN")) +
+  geom_line(aes(y= MANHATTAN, color="MANHATTAN")) +
+  geom_line(aes(y= `STATEN ISLAND`, color="STATEN ISLAND")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "Incidents by year normalized", y = NULL)
+
+```
+
+Tidying the unemployment data.  Needed to load important data points into columns by column number as the data was in a non-csv text file. Using the max unemployment rate per year.
+
+```{r unemployment_data_tidy, echo=TRUE}
+
+ny_unemployment_filtered <- ny_unemployment %>%
+  filter(grepl('New York-Newark-Jersey City', V1))
+
+ny_unemployment_split <- ny_unemployment_filtered %>%
+  separate(V1, c("d1", "Year", "Month", "d2", "Rate"), sep=c(105,113,120,172)) 
+
+ny_unemployment_by_date <- ny_unemployment_split %>%
+  select(c(Year, Month, Rate))
+
+ny_unemployment_by_date <- ny_unemployment_by_date %>% 
+  mutate(Year = as.numeric(Year)) %>%
+  filter(Year > 2005 & Year < 2021) %>%
+  select(c(Year, Rate))
+
+ny_unemployment_max <- ny_unemployment_by_date %>%
+  mutate(year = Year) %>% 
+  group_by(year) %>% 
+  summarise(max_rate = max(Rate)) %>%
+  mutate(max_rate = as.numeric(as.character(max_rate))) %>%
+  arrange(year)
+
+```
+
+Joining unemployment and shooting incident data and plotting both.  It appears there is a very strong correlation between the unemployment rate and shooting incidents.
+
+```{r plot_incidents_with_unemployment, echo=TRUE}
+
+by_date_norm_w_unemploy <- by_date_normalized %>%
+  left_join(ny_unemployment_max)
+
+by_date_norm_w_unemploy <- by_date_norm_w_unemploy %>%
+  mutate(normalized_rate = max_rate * 100)
+
+by_date_norm_w_unemploy %>%
+  ggplot(aes(x= year, y= BRONX)) +
+  geom_line(aes(color="BRONX")) +
+  geom_line(aes(y= QUEENS, color="QUEENS")) +
+  geom_line(aes(y= BROOKLYN, color="BROOKLYN")) +
+  geom_line(aes(y= MANHATTAN, color="MANHATTAN")) +
+  geom_line(aes(y= `STATEN ISLAND`, color="STATEN ISLAND")) +
+  geom_line(aes(y= normalized_rate, color="Unemployment Rate Normalized"))
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  ylab("Incidents") +
+  labs(title = "Incidents by year normalized with Uneployement Data", y = NULL)
+
+```
+
+
+Creating a heat map of the shooting incidents by using Latitude and Longitude.  The darker areas do appear to correspond to the Bronx and Brooklyn.
+
+```{r heat_map, echo=TRUE}
+
+incidences_filtered <- nypd_data %>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  filter(year >= 2020) %>%
+  select(c(Latitude, Longitude))
+
+incidences_filtered %>% 
+  ggplot(aes(Longitude, Latitude)) + 
+  geom_bin2d(binwidth=.01) +
+  geom_tile() + 
+  scale_fill_gradient(low = "white",high = "steelblue")
+
+
+```
+
+
+
+Next looking to see if the incidents are tied to the season of the year.  Now categorizing by year and month and looking for a trend.  The data and the plots show that the incidences are much higher during the warmer/hotter months.
+
+
+```{r total_by_month, echo=TRUE}
+by_year_n_month_orig <- nypd_data %>%
+  mutate(elem_year = year(OCCUR_DATE)) %>%
+  mutate(filter_year = as.numeric(elem_year)) %>%
+  mutate(elem_month = sprintf("%02i", month(OCCUR_DATE))) %>%
+  unite("Year_W_Month",
+        c(elem_year, elem_month),
+        sep = " - ",
+        remove = FALSE)
+
+
+by_year_n_month_all <- by_year_n_month_orig %>%
+  select(Year_W_Month) %>%
+  count(Year_W_Month) %>%
+  mutate(n = as.numeric(as.character(n))) %>%
+  arrange(Year_W_Month)
+  
+by_year_n_month_all
+
+ggplot(by_year_n_month_all, aes(x= Year_W_Month, y= n)) +
+geom_point(aes(color="n")) +
+geom_line(aes(y= n, color="n", group=1)) +
+theme(legend.position = "bottom",
+      axis.text.x = element_text(angle = 75)) +
+scale_x_discrete(breaks=by_year_n_month_all$Year_W_Month[seq(1,length(by_year_n_month_all$Year_W_Month),by=2)])
+labs(title = "Total Incidents by month", y = NULL)
+
+```
+
+Let's analyze a smaller time frame to get a paired down view of how warmer months are tied to a higher incident count.
+
+```{r total_by_month_filtered, echo=TRUE}
+
+by_year_n_month <- by_year_n_month_orig %>%
+  filter(filter_year < 2008) %>%
+  select(Year_W_Month) %>%
+  count(Year_W_Month) %>%
+  mutate(n = as.numeric(as.character(n))) %>%
+  arrange(Year_W_Month)
+
+by_year_n_month
+
+
+ggplot(by_year_n_month, aes(x= Year_W_Month, y= n)) +
+geom_point(aes(color="n")) +
+geom_line(aes(y= n, color="n", group=1)) +
+theme(legend.position = "bottom",
+      axis.text.x = element_text(angle = 75)) +
+labs(title = "Total Incidents by month", y = NULL)
+
+```
+
+Next, let's see if a model can be created from the data that fits the trend for higher incident counts during the warmer months.  Using a splines model with a degree of 5.  As shown, a model can be fitted to the data with an acceptable degree of accuracy.
+
+```{r create_model, echo=TRUE}
+
+updated_with_numeric <- by_year_n_month %>%
+  mutate(Year_W_Month_Num = gsub(" - ","",as.character(Year_W_Month))) %>% 
+  mutate(Year_W_Month_Num = as.numeric(Year_W_Month_Num)) 
+
+
+# make a model with spline degree 5
+mod5 <- lm(n ~ ns(Year_W_Month_Num, 5), data = updated_with_numeric)
+
+
+updated_with_numeric <- updated_with_numeric %>% 
+  mutate(prediction = predict(mod5))
+
+ggplot(updated_with_numeric, aes(x= Year_W_Month, y= n)) +
+geom_point(aes(color="n")) +
+geom_line(aes(y= n, color="n", group=1)) +
+geom_line(aes(y= prediction, color="prediction", group=1)) +
+theme(legend.position = "bottom",
+      axis.text.x = element_text(angle = 75)) +
+labs(title = "Total Incidents by month", y = NULL)
+
+
+```
+
+
+## Summary
+
+The plot showing the shooting incidents for each borough per year shows a lessening of incidents around 2016 with a large jump in 2020.  One might conclude that the Covid-19 pandemic and associated economic issues caused the jump in incidents.  The addition of the unemployment data does appear to support that the unemployment during the start of the pandemic did correlate highly with the number of shooting incidents.  The original plot shows that Brooklyn has the highest number of shooting incidents.  However, normalized for population size, the Bronx has the highest number.  The original plot for Staten Island might lead one to believe that Staten Island is considerably safer, however, when normalized for population size, Staten Island, Manhatten, and Queens have similar trends.
+
+It is often said that warmer or hotter months have a strong correlation to increased violent crime and this data does support that.  First a plot of all year/month combinations was generated and there was an obvious pattern of seasonal increases.  Next a smaller range was selected in order for a model to be fitted.  Using splines of degree five the model shows a good fit to the data,
+
+
+### Bias concerns
+
+One bias I had at first was that crime was simply higher in Brooklyn and the Bronx.  Originally, I hadn't thought about population size.  The 2010 census data from <https://www1.nyc.gov/assets/planning/download/pdf/planning-level/nyc-population/historical-population/nyc_total_pop_1900-2010.pdf> was used to normalize the numbers.  Each borough has had fairly steady, but moderate population growth over the last twenty years so although I only used the population from 2010 to normalize, it is indicative of the population size.
+
+
+
+```{r info, echo=FALSE}
+sessionInfo()
+```
